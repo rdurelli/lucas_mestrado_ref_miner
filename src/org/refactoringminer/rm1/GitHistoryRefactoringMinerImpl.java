@@ -1,12 +1,7 @@
 package org.refactoringminer.rm1;
 
-import gr.uom.java.xmi.UMLModel;
-import gr.uom.java.xmi.UMLModelASTReader;
-import gr.uom.java.xmi.diff.MoveSourceFolderRefactoring;
-import gr.uom.java.xmi.diff.MovedClassToAnotherSourceFolder;
-import gr.uom.java.xmi.diff.RenamePattern;
-import gr.uom.java.xmi.diff.StringDistance;
-import gr.uom.java.xmi.diff.UMLModelDiff;
+import gr.uom.java.xmi.*;
+import gr.uom.java.xmi.diff.*;
 
 import java.io.File;
 import java.io.FileInputStream;
@@ -67,6 +62,8 @@ import org.refactoringminer.api.Refactoring;
 import org.refactoringminer.api.RefactoringHandler;
 import org.refactoringminer.api.RefactoringMinerTimedOutException;
 import org.refactoringminer.api.RefactoringType;
+import org.refactoringminer.pred.EmbeddingChunkOfCode;
+import org.refactoringminer.pred.Snapshot;
 import org.refactoringminer.util.GitServiceImpl;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -151,6 +148,7 @@ public class GitHistoryRefactoringMinerImpl implements GitHistoryRefactoringMine
 				refactoringsAtRevision = modelDiff.getRefactorings();
 				refactoringsAtRevision.addAll(moveSourceFolderRefactorings);
 				refactoringsAtRevision = filter(refactoringsAtRevision);
+				saveRefactoringContentBeforeAndAfter(commitId, fileContentsBefore, fileContentsCurrent, refactoringsAtRevision);
 			} else {
 				//logger.info(String.format("Ignored revision %s with no changes in java files", commitId));
 				refactoringsAtRevision = Collections.emptyList();
@@ -160,6 +158,125 @@ public class GitHistoryRefactoringMinerImpl implements GitHistoryRefactoringMine
 			walk.dispose();
 		}
 		return refactoringsAtRevision;
+	}
+
+
+	private void fillSourceCodeBeforeInformation(String currentCommitId, Map<String, String> before, List<Snapshot> pieceOfCodes) {
+		String pathBefore;
+		String sourceCodeBefore;
+		Iterator<Map.Entry<String, String>> it = before.entrySet().iterator();
+		while (it.hasNext()) {
+			Map.Entry<String, String> mapz = it.next();
+			pathBefore = mapz.getKey();
+			sourceCodeBefore = mapz.getValue();
+			pieceOfCodes.add(createSnapshot(currentCommitId, pathBefore, sourceCodeBefore, Boolean.TRUE));
+		}
+	}
+
+	private Snapshot createSnapshot(String currentCommitId, String path, String sourceCode, Boolean isBefore) {
+		Snapshot piece = new Snapshot();
+		piece.setCommitId(currentCommitId);
+
+		if (isBefore) {
+			piece.setPathBefore(path);
+			piece.setSourceCodeBefore(sourceCode);
+		} else {
+			piece.setPathAfter(path);
+			piece.setSourceCodeAfter(sourceCode);
+		}
+
+		List<EmbeddingChunkOfCode> allChunkOfCode = new ArrayList<>();
+		EmbeddingChunkOfCode embeddingChunkOfCode = null;
+
+		String lines[] = sourceCode.split("\\r?\\n");
+		for (String statement : lines) {
+			embeddingChunkOfCode = new EmbeddingChunkOfCode();
+			embeddingChunkOfCode.setCodeStatement(statement);
+			allChunkOfCode.add(embeddingChunkOfCode);
+		}
+		piece.setEmbeddingChunkOfCodes(allChunkOfCode);
+		return piece;
+	}
+
+	private Snapshot getPieceOfCodesByPath(List<Snapshot> pieceOfCodes, String path) {
+		for (Snapshot snapshot : pieceOfCodes) {
+			if (path != null && path.equals(snapshot.getPathBefore())) {
+				return snapshot;
+			}
+		}
+		return null;
+	}
+
+	private void fillSourceCodeAfterInformation(String currentCommitId, Map<String, String> after, List<Snapshot> pieceOfCodes) {
+		String sourceCodeAfter;
+		String pathAfter;
+		Iterator<Map.Entry<String, String>> itAfter = after.entrySet().iterator();
+		while (itAfter.hasNext()) {
+			Map.Entry<String, String> mapz = itAfter.next();
+			pathAfter = mapz.getKey();
+			sourceCodeAfter = mapz.getValue();
+
+			Snapshot pieceOfCode = getPieceOfCodesByPath(pieceOfCodes, pathAfter);
+			if (pieceOfCode != null) {
+				pieceOfCode.setPathAfter(pathAfter);
+				pieceOfCode.setSourceCodeAfter(sourceCodeAfter);
+			} else {
+				pieceOfCodes.add(createSnapshot(currentCommitId, pathAfter, sourceCodeAfter, Boolean.FALSE));
+			}
+		}
+	}
+
+	private void fillEmbeddingSourceCode(List<Snapshot> pieceOfCodes, Refactoring refactoring, UMLOperation operationBefore) {
+		LocationInfo localInfo = operationBefore.getLocationInfo();
+		String filePath = localInfo.getFilePath();
+		for (Snapshot piece : pieceOfCodes) {
+			if (piece.getPathBefore() != null && piece.getPathBefore().trim().equals(filePath.trim())) {
+				int i2 = localInfo.getStartLine() - 1;
+				int j2 = localInfo.getEndLine() - 1;
+				for (int k = 0; k < piece.getEmbeddingChunkOfCodes().size(); k++) {
+					EmbeddingChunkOfCode embeddingChunkOfCode = piece.getEmbeddingChunkOfCodes().get(k);
+					if (k >= i2 && k <= j2) {
+						embeddingChunkOfCode.addRefactoringType(refactoring.getRefactoringType().getDisplayName());
+					} else {
+						embeddingChunkOfCode.addRefactoringType("none");
+					}
+
+				}
+			}
+		}
+		System.out.println("Não pegou nada ");
+	}
+
+	public void saveRefactoringContentBeforeAndAfter(String currentCommitId, Map<String, String> before, Map<String, String> after, List<Refactoring> allRefactoring) {
+
+		List<Snapshot> pieceOfCodes = new ArrayList<>();
+		this.fillSourceCodeBeforeInformation(currentCommitId, before, pieceOfCodes);
+		this.fillSourceCodeAfterInformation(currentCommitId, after, pieceOfCodes);
+
+		allRefactoring.forEach(refactoring -> {
+			if (refactoring instanceof MoveOperationRefactoring) {
+				UMLOperation operationBefore = ((MoveOperationRefactoring) refactoring).getOriginalOperation();
+				fillEmbeddingSourceCode(pieceOfCodes, refactoring, operationBefore);
+				for (Snapshot snapshot : pieceOfCodes) {
+					System.out.println(snapshot.getSourceCodeBefore());
+
+				}
+			} else if (refactoring instanceof ExtractOperationRefactoring) {
+				VariableDeclarationContainer variableDeclarationContainer = ((ExtractOperationRefactoring) refactoring).getSourceOperationBeforeExtraction();
+
+				UMLOperation operationBefore = (UMLOperation) ((ExtractOperationRefactoring) refactoring).getSourceOperationBeforeExtraction();
+				fillEmbeddingSourceCode(pieceOfCodes, refactoring, operationBefore);
+				for (Snapshot snapshot : pieceOfCodes) {
+					System.out.println(snapshot.getSourceCodeBefore());
+				}
+			} else if (refactoring instanceof RenameOperationRefactoring) {
+				UMLOperation operationBefore = ((RenameOperationRefactoring) refactoring).getOriginalOperation();
+				fillEmbeddingSourceCode(pieceOfCodes, refactoring, operationBefore);
+				for (Snapshot snapshot : pieceOfCodes) {
+					System.out.println(snapshot.getSourceCodeBefore());
+				}
+			}
+		});
 	}
 
 	public static List<MoveSourceFolderRefactoring> processIdenticalFiles(Map<String, String> fileContentsBefore, Map<String, String> fileContentsCurrent,
